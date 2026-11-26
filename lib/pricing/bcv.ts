@@ -176,6 +176,7 @@ export async function fetchMontosveRate(apiKey: string) {
 
   try {
     const response = await fetch(MONTOSVE_RATES_URL, {
+      method: 'GET',
       cache: 'no-store',
       headers: {
         Accept: 'application/json',
@@ -187,19 +188,19 @@ export async function fetchMontosveRate(apiKey: string) {
     const rawText = await response.text();
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      throw new Error(`MontosVE respondió HTTP ${response.status}. Respuesta cruda: ${rawText}`);
     }
 
     let payload: unknown;
     try {
       payload = JSON.parse(rawText);
     } catch (error) {
-      throw new Error(`La respuesta no es JSON válido: ${errorMessage(error)}`);
+      throw new Error(`La respuesta no es JSON válido: ${errorMessage(error)}. Respuesta cruda: ${rawText}`);
     }
 
     const rate = extractMontosveBcvRate(payload);
     if (rate === null || rate < 1 || rate > 10000) {
-      throw new Error('La respuesta JSON no contiene una tasa BCV/USD válida.');
+      throw new Error(`La respuesta JSON no contiene una tasa BCV/USD válida. Respuesta cruda: ${rawText}`);
     }
     return rate;
   } finally {

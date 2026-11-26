@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { fetchSupplierPrice } from '../../../../lib/pricing/suppliers';
+import { fetchSupplierOffer } from '../../../../lib/pricing/suppliers';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -13,10 +13,22 @@ export const maxDuration = 30;
 
 const ENEBA_CATALOG_PRODUCTS = [
   {
+    product_id: 'g-steam-10',
+    variant_id: 'v-s10-glo',
+    url: 'https://www.eneba.com/latam/steam-gift-card-steam-wallet-gift-card-10-usd-steam-key-united-states',
+  },
+  {
+    product_id: 'g-psn-10',
+    variant_id: 'v-ps10-us',
+    url: 'https://www.eneba.com/latam/psn-playstation-network-card-10-usd-usa-psn-key-united-states',
+  },
+  {
+    product_id: 'g-psn-75',
     variant_id: 'v-ps75-us',
     url: 'https://www.eneba.com/latam/psn-playstation-network-card-75-usd-usa-psn-key-united-states',
   },
   {
+    product_id: 'g-psn-5',
     variant_id: 'v-ps5-us',
     url: 'https://www.eneba.com/latam/psn-playstation-network-card-5-usd-usa-psn-key-united-states',
   },
@@ -26,7 +38,7 @@ type SupplierPriceInput = {
   variant_id: string;
   cost_usd: number;
   supplier: 'eneba';
-  seller_name: null;
+  seller_name: string | null;
   offer_url: string;
 };
 
@@ -164,65 +176,112 @@ export async function GET(request: Request) {
       );
     }
 
-    const supplierPrices: SupplierPriceInput[] = await Promise.all(ENEBA_CATALOG_PRODUCTS.map(async (product) => {
-      const costUsd = await fetchSupplierPrice({
-        supplier: 'eneba',
-        url: product.url,
-      });
-
-      console.log('[cron/sync-catalog][scraper]', {
-        variant_id: product.variant_id,
-        url: product.url,
-        current_cost_usd: costUsd,
-        expected_final_price_usd: calculateFinalPriceUsd(costUsd),
-      });
-
-      return {
-        variant_id: product.variant_id,
-        cost_usd: costUsd,
-        supplier: 'eneba',
-        seller_name: null,
-        offer_url: product.url,
-      };
+    const scrapeResults = await Promise.all(ENEBA_CATALOG_PRODUCTS.map(async (product) => {
+      try {
+        const offer = await fetchSupplierOffer({
+          supplier: 'eneba',
+          url: product.url,
+        });
+        const supplierPrice: SupplierPriceInput = {
+          variant_id: product.variant_id,
+          cost_usd: offer.priceUsd,
+          supplier: 'eneba',
+          seller_name: offer.sellerName,
+          offer_url: product.url,
+        };
+        console.log('[cron/sync-catalog][scraper]', {
+          variant_id: product.variant_id,
+          url: product.url,
+          current_cost_usd: supplierPrice.cost_usd,
+          expected_final_price_usd: calculateFinalPriceUsd(supplierPrice.cost_usd),
+          seller_name: supplierPrice.seller_name,
+        });
+        return { product, supplierPrice };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('[cron/sync-catalog][scraper-error]', {
+          variant_id: product.variant_id,
+          url: product.url,
+          error: message,
+        });
+        return { product, error: message };
+      }
     }));
 
-    const { error: productSeedError } = await supabase
-      .from('product_pricing')
-      .upsert(
-        { variant_id: 'v-ps5-us', product_id: 'g-psn-5' },
-        { onConflict: 'variant_id' }
-      );
-    if (productSeedError) throw productSeedError;
+    const syncedSupplierPrices: SyncedSupplierPrice[] = [];
+    const failedProducts: Array<{ variant_id: string; error: string }> = [];
+    const rpcResponses: unknown[] = [];
 
-    const { data, error: rpcError } = await supabase.rpc('sync_exchange_rate_and_recalculate_catalog', {
-      p_bcv_rate: bcvRate,
-      p_supplier_prices: supplierPrices,
-      p_updated_at: new Date().toISOString(),
-    });
+    for (const result of scrapeResults) {
+      if ('error' in result) {
+        failedProducts.push({
+          variant_id: result.product.variant_id,
+          error: result.error,
+        });
+        continue;
+      }
 
-    const rpcSummary = isRecord(data) ? data : null;
-    const psn5SyncResult = Array.isArray(rpcSummary?.products)
-      ? rpcSummary.products.find((product) => (
-        isRecord(product) && product.variant_id === 'v-ps5-us'
-      ))
-      : null;
-    console.log('[cron/sync-catalog][rpc-result]', {
-      error: rpcError,
-      success: rpcSummary?.success ?? null,
-      products_updated: rpcSummary?.products_updated ?? null,
-      psn5: psn5SyncResult ?? null,
-    });
+      const { product, supplierPrice } = result;
+      try {
+        const { error: productSeedError } = await supabase
+          .from('product_pricing')
+          .upsert(
+            { variant_id: product.variant_id, product_id: product.product_id },
+            { onConflict: 'variant_id' }
+          );
+        if (productSeedError) throw productSeedError;
 
-    if (rpcError) throw rpcError;
-    const syncedSupplierPrices = verifySyncedSupplierPrices(data, supplierPrices);
+        const { data, error: rpcError } = await supabase.rpc('sync_exchange_rate_and_recalculate_catalog', {
+          p_bcv_rate: bcvRate,
+          p_supplier_prices: [supplierPrice],
+          p_updated_at: new Date().toISOString(),
+        });
+
+        const rpcSummary = isRecord(data) ? data : null;
+        const syncedProduct = Array.isArray(rpcSummary?.products)
+          ? rpcSummary.products.find((entry) => (
+            isRecord(entry) && entry.variant_id === product.variant_id
+          ))
+          : null;
+        console.log('[cron/sync-catalog][rpc-result]', {
+          variant_id: product.variant_id,
+          error: rpcError,
+          success: rpcSummary?.success ?? null,
+          products_updated: rpcSummary?.products_updated ?? null,
+          product: syncedProduct ?? null,
+        });
+
+        if (rpcError) throw rpcError;
+        const [syncedPrice] = verifySyncedSupplierPrices(data, [supplierPrice]);
+        syncedSupplierPrices.push(syncedPrice);
+        rpcResponses.push({ variant_id: product.variant_id, response: data });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('[cron/sync-catalog][product-sync-error]', {
+          variant_id: product.variant_id,
+          error: message,
+        });
+        failedProducts.push({ variant_id: product.variant_id, error: message });
+      }
+    }
+
+    const hasSyncedProducts = syncedSupplierPrices.length > 0;
+    const partialSuccess = hasSyncedProducts && failedProducts.length > 0;
 
     return NextResponse.json({
-      success: true,
+      success: hasSyncedProducts,
+      partial_success: partialSuccess,
       bcv_rate: bcvRate,
-      supabase_response: data,
-      supplier_prices_synced: syncedSupplierPrices,
-      message: 'Sincronización completada exitosamente sin el fee de $0.40 en vitrina.',
-    });
+      products_updated: syncedSupplierPrices.length,
+      products: syncedSupplierPrices,
+      supabase_responses: rpcResponses,
+      failed_products: failedProducts,
+      message: partialSuccess
+        ? 'Sincronización parcial: se actualizaron los productos disponibles y se registraron los fallos individuales.'
+        : hasSyncedProducts
+          ? 'Sincronización completada exitosamente sin el fee de $0.40 en vitrina.'
+          : 'No se pudo actualizar ningún producto.',
+    }, { status: hasSyncedProducts ? 200 : 502 });
   } catch (err: any) {
     console.error('[cron/sync-catalog] Falló la sincronización del catálogo:', err);
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
