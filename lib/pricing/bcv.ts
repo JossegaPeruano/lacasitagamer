@@ -30,7 +30,10 @@ export async function refreshBcvRate() {
 
   try {
     storedRate = await getStoredBcvRate();
-    if (storedRate && isFreshStoredRate(storedRate)) {
+    if (
+      storedRate?.source === 'supabase:exchange_rates'
+      && isFreshStoredRate(storedRate)
+    ) {
       return {
         success: true as const,
         ...storedRate,
@@ -215,7 +218,8 @@ function extractMontosveBcvRate(payload: unknown): number | null {
   const rates = Array.isArray(root?.data) ? root.data : [];
   const bcvUsdRate = rates.find((entry) => {
     const rate = asRecord(entry);
-    return rate?.market === 'bcv'
+    return typeof rate?.market === 'string'
+      && rate.market.toLowerCase() === 'bcv'
       && typeof rate.currency_pair === 'string'
       && rate.currency_pair.toUpperCase() === 'USD/VES';
   });
@@ -277,7 +281,7 @@ async function persistBcvRate(rate: number): Promise<PersistResult> {
         updated_at: updatedAt,
       };
       if (finalPriceUsd !== null) {
-        updates.final_price_bs = Math.ceil(finalPriceUsd * rate);
+        updates.final_price_bs = Number((finalPriceUsd * rate).toFixed(2));
       }
 
       const { error: updateError } = await supabase
@@ -314,5 +318,9 @@ async function persistBcvRate(rate: number): Promise<PersistResult> {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : 'error desconocido';
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') {
+    return error.message;
+  }
+  return 'error desconocido';
 }

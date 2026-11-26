@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getStoredBcvRate } from '../../../lib/pricing/bcv';
+import { refreshBcvRate } from '../../../lib/pricing/bcv';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,16 +8,9 @@ export const maxDuration = 30;
 
 export async function GET(_request: Request) {
   try {
-    const storedRate = await getStoredBcvRate();
-    const isPricingFallback = storedRate.source.includes('product_pricing');
+    const refreshedRate = await refreshBcvRate();
     return NextResponse.json({
-      success: true,
-      rate: storedRate.rate,
-      bcv_rate: storedRate.rate,
-      source: storedRate.source,
-      updatedAt: storedRate.updatedAt,
-      stale: isPricingFallback,
-      persisted: !isPricingFallback,
+      ...refreshedRate,
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     console.error('Error al actualizar la tasa BCV oficial:', error);

@@ -778,12 +778,11 @@ export default function App() {
   const [binanceP2PRateUpdatedAt, setBinanceP2PRateUpdatedAt] = useState<string | null>(null);
   const [binanceP2PRateError, setBinanceP2PRateError] = useState<string | null>(null);
   const [isBinanceP2PRateLoading, setIsBinanceP2PRateLoading] = useState(false);
-  const [supplierPriceOverrides, setSupplierPriceOverrides] = useState<Record<string, {
+  const [catalogPriceOverrides, setCatalogPriceOverrides] = useState<Record<string, {
     final_usd: number;
     final_bs: number | null;
     bcv_rate: number | null;
   }>>({});
-  const [supplierPriceLoadError, setSupplierPriceLoadError] = useState<string | null>(null);
 
   // Navegación e Interfaz PWA
   const [cart, setCart] = useState([]);
@@ -989,13 +988,11 @@ export default function App() {
         });
 
         if (!active || signal.aborted) return;
-        setSupplierPriceOverrides(priceOverrides);
-        setSupplierPriceLoadError(null);
+        setCatalogPriceOverrides(priceOverrides);
       } catch (error) {
         if (!active || signal.aborted) return;
         const message = error instanceof Error ? error.message : 'Error desconocido al cargar precios.';
-        setSupplierPriceLoadError(message);
-        console.error('Error al cargar precios de proveedores:', error);
+        console.error('Error al cargar precios del catálogo:', message);
       }
     };
 
@@ -1340,18 +1337,25 @@ export default function App() {
     return new Intl.NumberFormat('es-VE', { maximumFractionDigits: 0 }).format(totalBs);
   };
 
-  const priceForVariant = (variant) => supplierPriceOverrides[variant.id]?.final_usd ?? variant.priceUsd;
+  const priceForVariant = (variant) => catalogPriceOverrides[variant.id]?.final_usd ?? variant.priceUsd;
   const priceBsForVariant = (variant) => {
-    if (bcvRate === null) return '—';
-    const storedPrice = supplierPriceOverrides[variant.id];
+    const storedPrice = catalogPriceOverrides[variant.id];
+    const storedBcvRate = bcvRate ?? storedPrice?.bcv_rate ?? null;
+    if (bcvRate === null && storedPrice?.final_bs !== null && storedPrice?.final_bs !== undefined) {
+      return new Intl.NumberFormat('es-VE', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(storedPrice.final_bs);
+    }
+    if (storedBcvRate === null) return '—';
     const storedPriceUsesCurrentRate = storedPrice?.final_bs !== null
       && storedPrice?.final_bs !== undefined
       && storedPrice.bcv_rate !== null
       && storedPrice.bcv_rate !== undefined
-      && Math.abs(storedPrice.bcv_rate - bcvRate) < 0.0000001;
+      && Math.abs(storedPrice.bcv_rate - storedBcvRate) < 0.0000001;
     const currentPriceBs = storedPriceUsesCurrentRate
       ? storedPrice.final_bs
-      : Number((priceForVariant(variant) * bcvRate).toFixed(2));
+      : Number((priceForVariant(variant) * storedBcvRate).toFixed(2));
     return new Intl.NumberFormat('es-VE', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
@@ -1359,16 +1363,16 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (Object.keys(supplierPriceOverrides).length === 0) return;
+    if (Object.keys(catalogPriceOverrides).length === 0) return;
     setCart((items) => items.map((item) => {
       const variant = MOCK_GAMES.flatMap((game) => game.variants).find((candidate) => candidate.id === item.variantId);
       if (!variant) return item;
       return {
         ...item,
-        priceUsd: supplierPriceOverrides[variant.id]?.final_usd ?? variant.priceUsd,
+        priceUsd: catalogPriceOverrides[variant.id]?.final_usd ?? variant.priceUsd,
       };
     }));
-  }, [supplierPriceOverrides]);
+  }, [catalogPriceOverrides]);
 
   const totalCartUsd = cart.reduce((acc, item) => acc + (item.priceUsd * item.quantity), 0);
   const totalCartItems = cart.reduce((acc, item) => acc + item.quantity, 0);
@@ -1544,9 +1548,13 @@ export default function App() {
       }
 
       setSupplierComparison(data as SupplierComparisonResult);
-      setSupplierPriceOverrides((previous) => ({
+      setCatalogPriceOverrides((previous) => ({
         ...previous,
-        [data.variant_id]: { final_usd: data.final_usd, final_bs: data.final_bs },
+        [data.variant_id]: {
+          final_usd: data.final_usd,
+          final_bs: data.final_bs,
+          bcv_rate: data.bcv_rate,
+        },
       }));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error desconocido al consultar proveedores.';
@@ -1982,12 +1990,6 @@ export default function App() {
 
       {/* CONTENIDO PRINCIPAL */}
       <main className="max-w-7xl mx-auto px-4 pt-6 space-y-8">
-        {supplierPriceLoadError && (
-          <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-2 text-xs text-amber-200">
-            No se pudieron cargar precios actualizados de proveedores; se muestran los precios base del catálogo.
-          </p>
-        )}
-        
         {/* PANEL ADMIN OCULTO */}
         {activeTab === 'admin' && isAdminAuthenticated ? (
           <div className="space-y-6 bg-slate-900/80 p-6 rounded-2xl border border-purple-900/50 shadow-2xl">
