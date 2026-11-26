@@ -1,6 +1,6 @@
 import { getSupabaseServerClient } from '../supabase/server';
 
-const MONTOSVE_RATES_URL = 'https://api.montosve.com/v1/fx/rates?trade_type=sell';
+const MONTOSVE_RATES_URL = 'https://api.montosve.com/v1/fx/rates?trade_type=buy';
 const DOLARAPI_PARALLEL_URL = 'https://ve.dolarapi.com/v1/dolares/paralelo';
 const SOURCE_TIMEOUT_MS = 6000;
 const USD_VES_RATE_CACHE_MS = 12 * 60 * 60 * 1000;
@@ -26,13 +26,44 @@ type PersistResult = {
   warnings: string[];
 };
 
+type RateProvider = typeof BINANCE_RATE_SOURCE | typeof DOLARAPI_RATE_SOURCE;
+
 type FetchedRate = {
   rate: number;
-  source: typeof BINANCE_RATE_SOURCE | typeof DOLARAPI_RATE_SOURCE;
+  source: 'montosve' | 'fallback';
+  rateSource: RateProvider;
+  tradeType: 'buy' | null;
+  sourceUpdatedAt: string | null;
   warning?: string;
 };
 
-export async function refreshBcvRate() {
+type RefreshedRate = {
+  success: true;
+  rate: number;
+  bcv_rate: number;
+  source: 'montosve' | 'fallback';
+  rate_source: string;
+  trade_type: 'buy' | null;
+  source_updated_at: string | null;
+  updatedAt: string | null;
+  stale: boolean;
+  persisted: boolean;
+  cached?: boolean;
+  warning?: string;
+};
+
+type MontosveRate = {
+  rate: number;
+  updatedAt: string | null;
+};
+
+function originForProvider(provider: string): 'montosve' | 'fallback' {
+  return provider === BINANCE_RATE_SOURCE ? 'montosve' : 'fallback';
+}
+
+export async function refreshBcvRate(
+  options: { forceRefresh?: boolean } = {}
+): Promise<RefreshedRate> {
   const sourceErrors: string[] = [];
   let storedRate: StoredRate | null = null;
   let storedRateReadError: unknown = null;
@@ -40,7 +71,8 @@ export async function refreshBcvRate() {
   try {
     storedRate = await getStoredBcvRate();
     if (
-      storedRate?.storageSource === 'exchange_rates'
+      !options.forceRefresh
+      && storedRate?.storageSource === 'exchange_rates'
       && (storedRate.provider === BINANCE_RATE_SOURCE || storedRate.provider === DOLARAPI_RATE_SOURCE)
       && isFreshStoredRate(storedRate)
     ) {
@@ -48,7 +80,10 @@ export async function refreshBcvRate() {
         success: true as const,
         rate: storedRate.rate,
         bcv_rate: storedRate.rate,
-        source: storedRate.provider,
+        source: originForProvider(storedRate.provider),
+        rate_source: storedRate.provider,
+        trade_type: storedRate.provider === BINANCE_RATE_SOURCE ? 'buy' as const : null,
+        source_updated_at: null,
         updatedAt: storedRate.updatedAt,
         stale: false,
         persisted: true,
@@ -62,17 +97,21 @@ export async function refreshBcvRate() {
 
   try {
     const fetchedRate = await fetchUsdVesRate(process.env.MONTOSVE_API_KEY || '');
-    const persisted = await persistBcvRate(fetchedRate.rate, fetchedRate.source);
+    const persisted = await persistBcvRate(fetchedRate.rate, fetchedRate.rateSource);
+    const warnings = [fetchedRate.warning, ...persisted.warnings].filter(Boolean);
     return {
       success: true as const,
       rate: fetchedRate.rate,
       bcv_rate: fetchedRate.rate,
       source: fetchedRate.source,
+      rate_source: fetchedRate.rateSource,
+      trade_type: fetchedRate.tradeType,
+      source_updated_at: fetchedRate.sourceUpdatedAt,
       updatedAt: new Date().toISOString(),
       stale: false,
       persisted: persisted.exchangeRateUpdated,
-      ...([fetchedRate.warning, ...persisted.warnings].filter(Boolean).length > 0
-        ? { warning: [fetchedRate.warning, ...persisted.warnings].filter(Boolean).join(' ') }
+      ...(warnings.length > 0
+        ? { warning: warnings.join(' ') }
         : {}),
     };
   } catch (error) {
@@ -96,7 +135,10 @@ export async function refreshBcvRate() {
       success: true as const,
       rate: storedRate.rate,
       bcv_rate: storedRate.rate,
-      source: storedRate.provider,
+      source: originForProvider(storedRate.provider),
+      rate_source: storedRate.provider,
+      trade_type: null,
+      source_updated_at: null,
       updatedAt: storedRate.updatedAt,
       stale: true,
       persisted: true,
@@ -186,7 +228,7 @@ export async function getStoredBcvRate(): Promise<StoredRate | null> {
   );
 }
 
-export async function fetchMontosveRate(apiKey: string) {
+export async function fetchMontosveRate(apiKey: string): Promise<MontosveRate> {
   if (!apiKey) {
     throw new Error('Falta configurar MONTOSVE_API_KEY.');
   }
@@ -218,17 +260,17 @@ export async function fetchMontosveRate(apiKey: string) {
       throw new Error(`La respuesta no es JSON válido: ${errorMessage(error)}. Respuesta cruda: ${rawText}`);
     }
 
-    const rate = extractMontosveBinanceRate(payload);
-    if (rate === null || rate < 1 || rate > 10000) {
-      throw new Error(`La respuesta JSON no contiene una tasa Binance P2P USDT/VES válida para SELL. Respuesta cruda: ${rawText}`);
+    const montosveRate = extractMontosveBinanceRate(payload);
+    if (montosveRate === null || montosveRate.rate < 1 || montosveRate.rate > 10000) {
+      throw new Error(`La respuesta JSON no contiene una tasa Binance P2P USDT/VES válida para BUY. Respuesta cruda: ${rawText}`);
     }
-    return rate;
+    return montosveRate;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function extractMontosveBinanceRate(payload: unknown): number | null {
+function extractMontosveBinanceRate(payload: unknown): MontosveRate | null {
   const root = asRecord(payload);
   if (root?.success === false || root?.ok === false) return null;
 
@@ -239,17 +281,23 @@ function extractMontosveBinanceRate(payload: unknown): number | null {
       && record.market.toLowerCase() === BINANCE_RATE_SOURCE
       && typeof record.currency_pair === 'string'
       && record.currency_pair.toUpperCase() === 'USDT/VES'
-      && (typeof record.trade_type !== 'string' || record.trade_type.toLowerCase() === 'sell');
+      && typeof record.trade_type === 'string'
+      && record.trade_type.toLowerCase() === 'buy';
   });
-  const rawRate = asRecord(binanceP2pRate)?.rate;
+  const record = asRecord(binanceP2pRate);
+  const rawRate = record?.rate;
   const parsedRate = typeof rawRate === 'number'
     ? rawRate
     : typeof rawRate === 'string'
       ? Number(rawRate.trim().replace(',', '.'))
       : NaN;
-  return Number.isFinite(parsedRate) && parsedRate >= 1 && parsedRate <= 10000
-    ? parsedRate
+  if (!Number.isFinite(parsedRate) || parsedRate < 1 || parsedRate > 10000) return null;
+
+  const rawUpdatedAt = record?.updated_at;
+  const updatedAt = typeof rawUpdatedAt === 'string' && Number.isFinite(Date.parse(rawUpdatedAt))
+    ? rawUpdatedAt
     : null;
+  return { rate: parsedRate, updatedAt };
 }
 
 async function fetchDolarApiRate(): Promise<number> {
@@ -288,15 +336,22 @@ async function fetchDolarApiRate(): Promise<number> {
 
 async function fetchUsdVesRate(apiKey: string): Promise<FetchedRate> {
   try {
+    const montosveRate = await fetchMontosveRate(apiKey);
     return {
-      rate: await fetchMontosveRate(apiKey),
-      source: BINANCE_RATE_SOURCE,
+      rate: montosveRate.rate,
+      source: 'montosve',
+      rateSource: BINANCE_RATE_SOURCE,
+      tradeType: 'buy',
+      sourceUpdatedAt: montosveRate.updatedAt,
     };
   } catch (primaryError) {
     try {
       return {
         rate: await fetchDolarApiRate(),
-        source: DOLARAPI_RATE_SOURCE,
+        source: 'fallback',
+        rateSource: DOLARAPI_RATE_SOURCE,
+        tradeType: null,
+        sourceUpdatedAt: null,
         warning: `MontosVE Binance P2P falló; se usó DolarAPI paralelo. ${errorMessage(primaryError)}`,
       };
     } catch (fallbackError) {

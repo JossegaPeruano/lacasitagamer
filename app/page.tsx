@@ -876,8 +876,21 @@ export default function App() {
   useEffect(() => {
     let active = true;
     let activeRequest: AbortController | null = null;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const fetchBcvRate = async () => {
+    const scheduleRefresh = (delay: number) => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void fetchBcvRate();
+      }, delay);
+    };
+
+    async function fetchBcvRate() {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+      }
       activeRequest?.abort();
       const requestController = new AbortController();
       activeRequest = requestController;
@@ -916,6 +929,8 @@ export default function App() {
             : null
         );
         setIsBcvRateLoading(false);
+        const persistenceFailed = 'persisted' in data && data.persisted === false;
+        scheduleRefresh(usingStoredRate || persistenceFailed ? 15 * 60 * 1000 : 60 * 1000);
       } catch (error) {
         if (!active || requestController.signal.aborted && activeRequest !== requestController) return;
         setBcvRateError(
@@ -924,16 +939,14 @@ export default function App() {
             : error instanceof Error ? error.message : 'No se pudo consultar la tasa USD/VES.'
         );
         setIsBcvRateLoading(false);
+        scheduleRefresh(15 * 60 * 1000);
       } finally {
         clearTimeout(timeout);
         if (activeRequest === requestController) activeRequest = null;
       }
-    };
+    }
 
     void fetchBcvRate();
-    const refreshTimer = setInterval(() => {
-      void fetchBcvRate();
-    }, 15 * 60 * 1000);
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') void fetchBcvRate();
     };
@@ -943,7 +956,7 @@ export default function App() {
     return () => {
       active = false;
       activeRequest?.abort();
-      clearInterval(refreshTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
       window.removeEventListener('focus', refreshWhenVisible);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
@@ -1007,7 +1020,7 @@ export default function App() {
     void fetchProductPrices();
     const refreshTimer = window.setInterval(() => {
       void fetchProductPrices();
-    }, 15 * 60 * 1000);
+    }, 60 * 1000);
     window.addEventListener('focus', refreshWhenVisible);
     document.addEventListener('visibilitychange', refreshWhenVisible);
 
@@ -1125,6 +1138,8 @@ export default function App() {
 
     let active = true;
     let refreshTimeout: ReturnType<typeof setTimeout> | undefined;
+    let pollingInterval: ReturnType<typeof setInterval> | undefined;
+    let requestPending = false;
     let latestRequest = 0;
     const controller = new AbortController();
     let supabase: ReturnType<typeof getSupabaseBrowserClient>;
@@ -1137,6 +1152,8 @@ export default function App() {
     }
 
     const loadOrders = async () => {
+      if (requestPending) return;
+      requestPending = true;
       const requestNumber = ++latestRequest;
       try {
         const { data, error } = await supabase.auth.getSession();
@@ -1163,6 +1180,7 @@ export default function App() {
         }
       } finally {
         if (active && requestNumber === latestRequest) setAdminOrdersLoading(false);
+        requestPending = false;
       }
     };
 
@@ -1181,11 +1199,13 @@ export default function App() {
         }
       });
     void loadOrders();
+    pollingInterval = setInterval(() => void loadOrders(), 15000);
 
     return () => {
       active = false;
       controller.abort();
       if (refreshTimeout) clearTimeout(refreshTimeout);
+      if (pollingInterval) clearInterval(pollingInterval);
       void supabase.removeChannel(channel);
     };
   }, [activeTab, adminTab, isAdminAuthenticated]);
@@ -1583,6 +1603,10 @@ export default function App() {
       setCheckoutError('Ingresa la referencia del pago para continuar.');
       return;
     }
+    if (checkoutForm.referenceNumber.trim().length < 3 || checkoutForm.referenceNumber.trim().length > 80) {
+      setCheckoutError('La referencia de pago debe tener entre 3 y 80 caracteres.');
+      return;
+    }
     if (cart.length > 20 || cart.some((item) => item.quantity > 25)) {
       setCheckoutError('El pedido admite hasta 20 variantes y 25 unidades por variante.');
       return;
@@ -1634,21 +1658,6 @@ export default function App() {
 
       const supabase = getSupabaseBrowserClient();
       const orderId = checkoutRequestKey.current ?? (checkoutRequestKey.current = crypto.randomUUID());
-      let paymentProofPath: string | null = null;
-      if (paymentProofFile) {
-        const extension = paymentProofFile.type === 'image/jpeg'
-          ? 'jpg'
-          : paymentProofFile.type === 'image/png' ? 'png' : 'webp';
-        paymentProofPath = `${orderId}/${crypto.randomUUID()}.${extension}`;
-        const { error: uploadError } = await supabase.storage
-          .from('payment-proofs')
-          .upload(paymentProofPath, paymentProofFile, {
-            cacheControl: '0',
-            contentType: paymentProofFile.type,
-            upsert: false,
-          });
-        if (uploadError) throw uploadError;
-      }
 
       const items = cart.map((item) => ({
         name: `${item.title} (${item.platform})`,
@@ -1657,50 +1666,46 @@ export default function App() {
         priceUsd: Number(item.priceUsd),
         quantity: item.quantity,
       }));
-      const totalsByVariant = new Map<string, number>();
-      for (const item of items) {
-        totalsByVariant.set(
-          item.variantId,
-          (totalsByVariant.get(item.variantId) ?? 0) + item.priceUsd * item.quantity
-        );
-      }
       const subtotal = Number(items.reduce((sum, item) => sum + item.priceUsd * item.quantity, 0).toFixed(2));
       const orderTotal = Number((subtotal - pointsUsdDiscount + SERVICE_FEE_USD).toFixed(2));
       if (!Number.isFinite(orderTotal) || orderTotal <= 0) {
         throw new Error('El total del pedido no es válido.');
       }
-      const customerInfo = {
-        email: customerEmail.toLowerCase(),
-        phone: customerPhone,
-        name: customerName,
-        bank_name: checkoutForm.paymentMethod === 'binance' ? 'Binance' : checkoutForm.bankName.trim(),
-        items,
-        subtotal,
-        discount: pointsUsdDiscount,
-        service_fee_usd: SERVICE_FEE_USD,
-        order_total: orderTotal,
-        bcv_rate: Number(checkoutBcvRate.toFixed(4)),
-        total_bs: Number((orderTotal * checkoutBcvRate).toFixed(2)),
-        payment_proof_path: paymentProofPath,
-      };
-      const salesRows = Array.from(totalsByVariant.entries()).map(([variantId, total]) => ({
-        order_id: orderId,
-        variant_id: String(variantId),
-        total: Number(total.toFixed(2)),
-        payment_method: checkoutForm.paymentMethod,
-        payment_reference: checkoutForm.referenceNumber.trim(),
-        customer_info: customerInfo,
-        status: 'pendiente',
-      }));
-      const insert = supabase.from('sales').insert(salesRows).select('id, order_id');
-      const { data, error } = salesRows.length === 1 ? await insert.single() : await insert;
-      if (error) {
-        console.error('Error detallado al insertar la venta en Supabase:', error);
-        throw new Error(error.message);
+
+      const requestBody = new FormData();
+      requestBody.set('email', customerEmail);
+      requestBody.set('name', customerName);
+      requestBody.set('phone', customerPhone);
+      requestBody.set('paymentMethod', checkoutForm.paymentMethod);
+      requestBody.set(
+        'bankName',
+        checkoutForm.paymentMethod === 'binance' ? 'Binance' : checkoutForm.bankName.trim()
+      );
+      requestBody.set('referenceNumber', checkoutForm.referenceNumber.trim());
+      requestBody.set('idempotencyKey', orderId);
+      requestBody.set('items', JSON.stringify(items));
+      requestBody.set('discountUsd', pointsUsdDiscount.toFixed(2));
+      requestBody.set('bcvRate', checkoutBcvRate.toFixed(4));
+      if (paymentProofFile) requestBody.set('paymentProof', paymentProofFile, paymentProofFile.name);
+
+      const response = await fetch('/api/sales', { method: 'POST', body: requestBody });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        const errorMessage = typeof result === 'object'
+          && result !== null
+          && 'error' in result
+          && typeof result.error === 'string'
+          ? result.error
+          : 'No se pudo registrar el pedido.';
+        throw new Error(errorMessage);
       }
-      const insertedRows = Array.isArray(data) ? data : data ? [data] : [];
-      if (insertedRows.length !== salesRows.length || insertedRows[0]?.order_id !== orderId) {
-        throw new Error('Supabase no devolvió la confirmación completa del pedido.');
+      if (
+        typeof result !== 'object'
+        || result === null
+        || !('orderId' in result)
+        || result.orderId !== orderId
+      ) {
+        throw new Error('El servidor no confirmó el registro del pedido.');
       }
 
       const confirmation = {
@@ -1902,7 +1907,7 @@ export default function App() {
           <div className="flex items-center gap-2">
             <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
             <span className="text-purple-300 font-semibold">
-              {usdVesRateSource === 'dolarapi_paralelo' ? 'Tasa DolarAPI (respaldo):' : 'Tasa Binance P2P:'}
+              {usdVesRateSource === 'fallback' ? 'Tasa DolarAPI (respaldo):' : 'Tasa Binance P2P:'}
             </span>
             <span className="text-white font-bold font-mono" aria-live="polite" title={bcvRateError ?? undefined}>
               {bcvRate === null
@@ -2217,7 +2222,7 @@ export default function App() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-1">
                     <p className="text-xs text-slate-400">
-                      {usdVesRateSource === 'dolarapi_paralelo' ? 'Tasa DolarAPI (respaldo)' : 'Tasa Binance P2P'}
+                      {usdVesRateSource === 'fallback' ? 'Tasa DolarAPI (respaldo)' : 'Tasa Binance P2P'}
                     </p>
                     <p className="text-xl font-bold font-mono text-white">
                       {bcvRate === null ? (bcvRateError ? 'No disponible' : 'Consultando...') : `${bcvRate.toFixed(2)} Bs.`}

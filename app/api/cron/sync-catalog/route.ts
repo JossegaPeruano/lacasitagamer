@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { revalidatePath } from 'next/cache';
 import { createClient } from '@supabase/supabase-js';
 import { refreshBcvRate } from '../../../../lib/pricing/bcv';
 import { fetchSupplierOffer } from '../../../../lib/pricing/suppliers';
@@ -122,9 +123,9 @@ export async function GET(request: Request) {
   }
 
   try {
-    const refreshedRate = await refreshBcvRate();
+    const refreshedRate = await refreshBcvRate({ forceRefresh: true });
     const usdVesRate = refreshedRate.rate;
-    const rateSource = refreshedRate.source;
+    const rateSource = refreshedRate.rate_source;
 
     const scrapeResults = await Promise.all(ENEBA_CATALOG_PRODUCTS.map(async (product) => {
       try {
@@ -219,11 +220,17 @@ export async function GET(request: Request) {
     const hasSyncedProducts = syncedSupplierPrices.length > 0;
     const partialSuccess = hasSyncedProducts && failedProducts.length > 0;
 
+    revalidatePath('/');
     return NextResponse.json({
       success: hasSyncedProducts,
       partial_success: partialSuccess,
       bcv_rate: usdVesRate,
-      source: rateSource,
+      source: refreshedRate.source,
+      rate_source: rateSource,
+      trade_type: refreshedRate.trade_type,
+      source_updated_at: refreshedRate.source_updated_at,
+      persisted: refreshedRate.persisted,
+      ...(refreshedRate.warning ? { warning: refreshedRate.warning } : {}),
       products_updated: syncedSupplierPrices.length,
       products: syncedSupplierPrices,
       supabase_responses: rpcResponses,

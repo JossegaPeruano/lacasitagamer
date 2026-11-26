@@ -90,9 +90,9 @@ async function toAdminOrders(rows: SaleRow[], supabase: ReturnType<typeof getSup
       customerName: String(customerInfo.name ?? ''),
       customerEmail: String(customerInfo.email ?? ''),
       phone: String(customerInfo.phone ?? ''),
-      paymentMethod: String(order.method),
+      paymentMethod: String(order.payment_method ?? order.method ?? ''),
       bankName: String(customerInfo.bank_name ?? ''),
-      referenceNumber: String(order.reference),
+      referenceNumber: String(order.payment_reference ?? order.reference ?? ''),
       totalUsd: Number.isFinite(totalUsd) ? totalUsd : orderRows.reduce((sum, row) => sum + Number(row.total || 0), 0),
       totalBs: Number.isFinite(totalBs) ? totalBs : 0,
       status: orderRows.every((row) => row.status === 'completado')

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { revalidatePath } from 'next/cache';
 import { refreshBcvRate } from '../../../../lib/pricing/bcv';
 import { getSupabaseServerClient } from '../../../../lib/supabase/server';
 
@@ -119,22 +120,30 @@ export async function GET(request: Request) {
   }
 
   try {
-    const refreshedRate = await refreshBcvRate();
+    const refreshedRate = await refreshBcvRate({ forceRefresh: true });
     const checkedAt = new Date().toISOString();
     const supabase = getSupabaseServerClient();
     const { data, error } = await supabase.rpc('recalculate_catalog_with_fixed_margin', {
       p_bcv_rate: refreshedRate.rate,
       p_margin_usd: FIXED_MARGIN_USD,
       p_updated_at: checkedAt,
-      p_rate_source: refreshedRate.source,
+      p_rate_source: refreshedRate.rate_source,
     });
 
     if (error) throw error;
 
     const summary = parseCatalogSyncSummary(data);
+    revalidatePath('/');
     return jsonResponse({
       ...summary,
       source: refreshedRate.source,
+      rate_source: refreshedRate.rate_source,
+      trade_type: refreshedRate.trade_type,
+      source_updated_at: refreshedRate.source_updated_at,
+      stale: refreshedRate.stale,
+      cached: refreshedRate.cached ?? false,
+      persisted: true,
+      ...(refreshedRate.warning ? { rate_refresh_warning: refreshedRate.warning } : {}),
       margin_usd: FIXED_MARGIN_USD,
     });
   } catch (error) {
