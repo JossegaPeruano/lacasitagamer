@@ -13,14 +13,14 @@ export async function GET(_request: Request) {
       ...refreshedRate,
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
-    console.error('Error al actualizar la tasa BCV oficial:', error);
+    console.error('Error al actualizar la tasa Binance P2P/DolarAPI:', error);
     return NextResponse.json(
       {
         success: false,
         rate: null,
         bcv_rate: null,
         source: null,
-        error: error instanceof Error ? error.message : 'No se pudo consultar la tasa BCV.',
+        error: error instanceof Error ? error.message : 'No se pudo consultar la tasa USD/VES.',
       },
       { status: 502, headers: { 'Cache-Control': 'no-store' } }
     );

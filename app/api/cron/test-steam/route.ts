@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { fetchMontosveRate } from '../../../../lib/pricing/bcv';
+import { refreshBcvRate } from '../../../../lib/pricing/bcv';
 import { getSupabaseServerClient } from '../../../../lib/supabase/server';
 
 export const runtime = 'nodejs';
@@ -119,13 +119,14 @@ export async function GET(request: Request) {
   }
 
   try {
-    const bcvRate = await fetchMontosveRate(process.env.MONTOSVE_API_KEY || '');
+    const refreshedRate = await refreshBcvRate();
     const checkedAt = new Date().toISOString();
     const supabase = getSupabaseServerClient();
     const { data, error } = await supabase.rpc('recalculate_catalog_with_fixed_margin', {
-      p_bcv_rate: bcvRate,
+      p_bcv_rate: refreshedRate.rate,
       p_margin_usd: FIXED_MARGIN_USD,
       p_updated_at: checkedAt,
+      p_rate_source: refreshedRate.source,
     });
 
     if (error) throw error;
@@ -133,14 +134,14 @@ export async function GET(request: Request) {
     const summary = parseCatalogSyncSummary(data);
     return jsonResponse({
       ...summary,
-      source: 'monedasve_api',
+      source: refreshedRate.source,
       margin_usd: FIXED_MARGIN_USD,
     });
   } catch (error) {
     console.error('[cron/test-steam] Falló la actualización del catálogo:', error);
     return jsonResponse({
       success: false,
-      source: 'monedasve_api',
+      source: null,
       timestamp: new Date().toISOString(),
       error: getErrorMessage(error),
     });

@@ -771,6 +771,7 @@ export default function App() {
   const router = useRouter();
   // Tasas Financieras
   const [bcvRate, setBcvRate] = useState<number | null>(null);
+  const [usdVesRateSource, setUsdVesRateSource] = useState<string | null>(null);
   const [bcvRateError, setBcvRateError] = useState<string | null>(null);
   const [isBcvRateLoading, setIsBcvRateLoading] = useState(true);
   const [isBcvRateFromCache, setIsBcvRateFromCache] = useState(false);
@@ -888,22 +889,25 @@ export default function App() {
           signal: requestController.signal,
         });
         if (!response.ok) {
-          throw new Error(`La API BCV respondió con el estado ${response.status}.`);
+          throw new Error(`La API de tasa Binance P2P respondió con el estado ${response.status}.`);
         }
 
         const data: unknown = await response.json();
         if (typeof data !== 'object' || data === null) {
-          throw new Error('La respuesta de la API BCV no contiene una tasa válida.');
+          throw new Error('La respuesta de la API de tasa no contiene un valor válido.');
         }
 
         const rawRate = 'rate' in data ? data.rate : null;
         const rate = typeof rawRate === 'number' || typeof rawRate === 'string' ? Number(rawRate) : NaN;
         if (!Number.isFinite(rate) || rate <= 0) {
-          throw new Error('La respuesta de la API BCV no contiene una tasa válida.');
+          throw new Error('La respuesta de la API de tasa no contiene un valor válido.');
         }
 
         if (!active) return;
         setBcvRate(rate);
+        setUsdVesRateSource(
+          'source' in data && typeof data.source === 'string' ? data.source : null
+        );
         const usingStoredRate = 'stale' in data && data.stale === true;
         setIsBcvRateFromCache(usingStoredRate);
         setBcvRateError(
@@ -916,8 +920,8 @@ export default function App() {
         if (!active || requestController.signal.aborted && activeRequest !== requestController) return;
         setBcvRateError(
           requestController.signal.aborted
-            ? 'La consulta de la tasa BCV superó el tiempo de espera.'
-            : error instanceof Error ? error.message : 'No se pudo consultar la tasa BCV.'
+            ? 'La consulta de la tasa USD/VES superó el tiempo de espera.'
+            : error instanceof Error ? error.message : 'No se pudo consultar la tasa USD/VES.'
         );
         setIsBcvRateLoading(false);
       } finally {
@@ -1608,21 +1612,24 @@ export default function App() {
         const response = await fetch('/api/bcv-rate', { cache: 'no-store' });
         const data: unknown = await response.json();
         if (!response.ok || typeof data !== 'object' || data === null || !('rate' in data)) {
-          throw new Error('No hay una tasa BCV guardada disponible para calcular el pedido.');
+          throw new Error('No hay una tasa USD/VES disponible para calcular el pedido.');
         }
 
         const rate = typeof data.rate === 'number' || typeof data.rate === 'string' ? Number(data.rate) : NaN;
         if (!Number.isFinite(rate) || rate <= 0) {
-          throw new Error('La tasa BCV guardada no es válida.');
+          throw new Error('La tasa USD/VES guardada no es válida.');
         }
         checkoutBcvRate = rate;
         setBcvRate(rate);
+        setUsdVesRateSource(
+          'source' in data && typeof data.source === 'string' ? data.source : null
+        );
         const usingStoredRate = 'stale' in data && data.stale === true;
         setIsBcvRateFromCache(usingStoredRate);
         setBcvRateError(usingStoredRate && 'error' in data && typeof data.error === 'string' ? data.error : null);
       }
       if (checkoutBcvRate === null || !Number.isFinite(checkoutBcvRate) || checkoutBcvRate <= 0) {
-        throw new Error('No hay una tasa BCV válida para registrar el pedido.');
+        throw new Error('No hay una tasa USD/VES válida para registrar el pedido.');
       }
 
       const supabase = getSupabaseBrowserClient();
@@ -1894,11 +1901,13 @@ export default function App() {
         <div className="bg-gradient-to-r from-purple-950 via-indigo-950 to-slate-950 px-4 py-1.5 text-xs text-slate-300 flex justify-between items-center border-b border-purple-800/20">
           <div className="flex items-center gap-2">
             <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-purple-300 font-semibold">Tasa BCV Oficial:</span>
+            <span className="text-purple-300 font-semibold">
+              {usdVesRateSource === 'dolarapi_paralelo' ? 'Tasa DolarAPI (respaldo):' : 'Tasa Binance P2P:'}
+            </span>
             <span className="text-white font-bold font-mono" aria-live="polite" title={bcvRateError ?? undefined}>
               {bcvRate === null
                 ? (isBcvRateLoading ? 'Cargando tasa...' : 'No disponible')
-                : `${new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(bcvRate)} Bs/USD`}
+                : `Bs. ${new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(bcvRate)}`}
             </span>
             {bcvRate !== null && isBcvRateFromCache && (
               <span className="text-amber-300" title={bcvRateError ?? 'Usando la última tasa guardada.'}>
@@ -2207,7 +2216,9 @@ export default function App() {
                 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-1">
-                    <p className="text-xs text-slate-400">Tasa Oficial BCV</p>
+                    <p className="text-xs text-slate-400">
+                      {usdVesRateSource === 'dolarapi_paralelo' ? 'Tasa DolarAPI (respaldo)' : 'Tasa Binance P2P'}
+                    </p>
                     <p className="text-xl font-bold font-mono text-white">
                       {bcvRate === null ? (bcvRateError ? 'No disponible' : 'Consultando...') : `${bcvRate.toFixed(2)} Bs.`}
                     </p>

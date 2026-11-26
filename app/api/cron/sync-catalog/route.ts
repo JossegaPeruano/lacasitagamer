@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { refreshBcvRate } from '../../../../lib/pricing/bcv';
 import { fetchSupplierOffer } from '../../../../lib/pricing/suppliers';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -50,15 +51,6 @@ type SyncedSupplierPrice = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function parseBcvRate(value: unknown): number | null {
-  const rate = typeof value === 'number'
-    ? value
-    : typeof value === 'string'
-      ? Number(value.trim().replace(',', '.'))
-      : NaN;
-  return Number.isFinite(rate) && rate >= 1 && rate <= 10000 ? rate : null;
 }
 
 function calculateFinalPriceUsd(costUsd: number): number {
@@ -130,51 +122,9 @@ export async function GET(request: Request) {
   }
 
   try {
-    let bcvRate = 904.4485;
-
-    const { data: currentRate, error: rateError } = await supabase
-      .from('exchange_rates')
-      .select('rate')
-      .eq('currency', 'USD')
-      .maybeSingle();
-
-    if (rateError) {
-      console.warn('[cron/sync-catalog] No se pudo leer exchange_rates; se conservará el respaldo:', rateError);
-    } else {
-      const storedRate = parseBcvRate(currentRate?.rate);
-      if (storedRate !== null) {
-        bcvRate = storedRate;
-      } else if (currentRate) {
-        console.warn('[cron/sync-catalog] La tasa almacenada no es válida; se conservará el respaldo.');
-      }
-    }
-
-    try {
-      const bcvRes = await fetch('https://pyd-monedasve.vercel.app/api/v1/latest', { cache: 'no-store' });
-      if (!bcvRes.ok) {
-        throw new Error(`MontosVE respondió con HTTP ${bcvRes.status}.`);
-      }
-
-      const bcvData: unknown = await bcvRes.json();
-      if (typeof bcvData === 'object' && bcvData !== null && !Array.isArray(bcvData)) {
-        const payload = bcvData as Record<string, unknown>;
-        const rates = typeof payload.rates === 'object' && payload.rates !== null && !Array.isArray(payload.rates)
-          ? payload.rates as Record<string, unknown>
-          : null;
-        const externalRate = parseBcvRate(rates?.USD ?? payload.USD);
-        if (externalRate !== null) {
-          bcvRate = externalRate;
-        } else {
-          console.warn('[cron/sync-catalog] MontosVE no devolvió una tasa USD válida; se usará la tasa de respaldo.');
-        }
-      } else {
-        console.warn('[cron/sync-catalog] MontosVE devolvió un formato inválido; se usará la tasa de respaldo.');
-      }
-    } catch (externalError: any) {
-      console.warn(
-        `[cron/sync-catalog] Falló la consulta a MontosVE; se usará la tasa de respaldo: ${externalError?.message ?? String(externalError)}`
-      );
-    }
+    const refreshedRate = await refreshBcvRate();
+    const usdVesRate = refreshedRate.rate;
+    const rateSource = refreshedRate.source;
 
     const scrapeResults = await Promise.all(ENEBA_CATALOG_PRODUCTS.map(async (product) => {
       try {
@@ -232,9 +182,10 @@ export async function GET(request: Request) {
         if (productSeedError) throw productSeedError;
 
         const { data, error: rpcError } = await supabase.rpc('sync_exchange_rate_and_recalculate_catalog', {
-          p_bcv_rate: bcvRate,
+          p_bcv_rate: usdVesRate,
           p_supplier_prices: [supplierPrice],
           p_updated_at: new Date().toISOString(),
+          p_rate_source: rateSource,
         });
 
         const rpcSummary = isRecord(data) ? data : null;
@@ -271,7 +222,8 @@ export async function GET(request: Request) {
     return NextResponse.json({
       success: hasSyncedProducts,
       partial_success: partialSuccess,
-      bcv_rate: bcvRate,
+      bcv_rate: usdVesRate,
+      source: rateSource,
       products_updated: syncedSupplierPrices.length,
       products: syncedSupplierPrices,
       supabase_responses: rpcResponses,

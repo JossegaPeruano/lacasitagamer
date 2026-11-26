@@ -1,10 +1,12 @@
 import { getSupabaseServerClient } from '../supabase/server';
 
-const MONTOSVE_RATES_URL = 'https://api.montosve.com/v1/fx/rates';
+const MONTOSVE_RATES_URL = 'https://api.montosve.com/v1/fx/rates?trade_type=sell';
+const DOLARAPI_PARALLEL_URL = 'https://ve.dolarapi.com/v1/dolares/paralelo';
 const SOURCE_TIMEOUT_MS = 6000;
-const BCV_RATE_CACHE_SECONDS = 12 * 60 * 60;
-const BCV_RATE_CACHE_MS = BCV_RATE_CACHE_SECONDS * 1000;
-const STEAM_VARIANT_ID = 'v-s10-glo';
+const USD_VES_RATE_CACHE_MS = 12 * 60 * 60 * 1000;
+const BINANCE_RATE_SOURCE = 'binance_p2p';
+const DOLARAPI_RATE_SOURCE = 'dolarapi_paralelo';
+const LEGACY_BINANCE_RATE_SOURCE = 'binance_p2p_usdt_ves';
 
 type PricingRow = {
   variant_id: string;
@@ -14,13 +16,20 @@ type PricingRow = {
 type StoredRate = {
   rate: number;
   updatedAt: string | null;
-  source: string;
+  storageSource: string;
+  provider: string;
 };
 
 type PersistResult = {
   productPricingUpdated: number;
   exchangeRateUpdated: boolean;
   warnings: string[];
+};
+
+type FetchedRate = {
+  rate: number;
+  source: typeof BINANCE_RATE_SOURCE | typeof DOLARAPI_RATE_SOURCE;
+  warning?: string;
 };
 
 export async function refreshBcvRate() {
@@ -31,13 +40,16 @@ export async function refreshBcvRate() {
   try {
     storedRate = await getStoredBcvRate();
     if (
-      storedRate?.source === 'supabase:exchange_rates'
+      storedRate?.storageSource === 'exchange_rates'
+      && (storedRate.provider === BINANCE_RATE_SOURCE || storedRate.provider === DOLARAPI_RATE_SOURCE)
       && isFreshStoredRate(storedRate)
     ) {
       return {
         success: true as const,
-        ...storedRate,
+        rate: storedRate.rate,
         bcv_rate: storedRate.rate,
+        source: storedRate.provider,
+        updatedAt: storedRate.updatedAt,
         stale: false,
         persisted: true,
         cached: true,
@@ -45,26 +57,28 @@ export async function refreshBcvRate() {
     }
   } catch (error) {
     storedRateReadError = error;
-    console.error('[bcv][stored-rate] Falló la lectura de la tasa almacenada:', error);
+    console.error('[usd-ves][stored-rate] Falló la lectura de la tasa almacenada:', error);
   }
 
   try {
-    const rate = await fetchMontosveRate(process.env.MONTOSVE_API_KEY || '');
-    const persisted = await persistBcvRate(rate);
+    const fetchedRate = await fetchUsdVesRate(process.env.MONTOSVE_API_KEY || '');
+    const persisted = await persistBcvRate(fetchedRate.rate, fetchedRate.source);
     return {
       success: true as const,
-      rate,
-      bcv_rate: rate,
-      source: 'montosve.com',
+      rate: fetchedRate.rate,
+      bcv_rate: fetchedRate.rate,
+      source: fetchedRate.source,
       updatedAt: new Date().toISOString(),
       stale: false,
       persisted: persisted.exchangeRateUpdated,
-      ...(persisted.warnings.length > 0 ? { warning: persisted.warnings.join(' ') } : {}),
+      ...([fetchedRate.warning, ...persisted.warnings].filter(Boolean).length > 0
+        ? { warning: [fetchedRate.warning, ...persisted.warnings].filter(Boolean).join(' ') }
+        : {}),
     };
   } catch (error) {
     const message = errorMessage(error);
-    sourceErrors.push(`MontosVE: ${message}`);
-    console.error('Error fetching MontosVE:', error);
+    sourceErrors.push(message);
+    console.error('Error obteniendo la tasa Binance P2P o su respaldo DolarAPI:', error);
   }
 
   if (!storedRate) {
@@ -72,20 +86,22 @@ export async function refreshBcvRate() {
       storedRate = await getStoredBcvRate();
     } catch (error) {
       storedRateReadError = error;
-      console.error('[bcv][stored-rate] Falló la lectura de la tasa de respaldo en Supabase:', error);
+      console.error('[usd-ves][stored-rate] Falló la lectura de la tasa de respaldo en Supabase:', error);
     }
   }
 
   if (storedRate) {
-    console.warn(`[bcv][fallback:${storedRate.source}] Se usará la última tasa válida guardada.`);
+    console.warn(`[usd-ves][fallback:${storedRate.provider}] Se usará la última tasa USD/VES válida guardada.`);
     return {
       success: true as const,
-      ...storedRate,
+      rate: storedRate.rate,
       bcv_rate: storedRate.rate,
+      source: storedRate.provider,
+      updatedAt: storedRate.updatedAt,
       stale: true,
       persisted: true,
       warning: [
-        'MontosVE no respondió; se devuelve la última tasa válida guardada en Supabase.',
+        'Binance P2P y DolarAPI no respondieron; se devuelve la última tasa guardada en Supabase.',
         ...sourceErrors,
       ].join(' '),
     };
@@ -93,12 +109,12 @@ export async function refreshBcvRate() {
 
   if (storedRateReadError) {
     throw new Error(
-      `Fallaron las fuentes BCV (${sourceErrors.join('; ')}) y la lectura de Supabase (${errorMessage(storedRateReadError)}).`
+      `Fallaron Binance P2P/DolarAPI (${sourceErrors.join('; ')}) y la lectura de Supabase (${errorMessage(storedRateReadError)}).`
     );
   }
 
   throw new Error(
-    `Fallaron las fuentes BCV (${sourceErrors.join('; ')}) y no existe una tasa válida guardada en Supabase.`
+    `Fallaron Binance P2P/DolarAPI (${sourceErrors.join('; ')}) y no existe una tasa válida guardada en Supabase.`
   );
 }
 
@@ -106,20 +122,20 @@ function isFreshStoredRate(storedRate: StoredRate) {
   if (!storedRate.updatedAt) return false;
   const updatedAt = Date.parse(storedRate.updatedAt);
   const age = Date.now() - updatedAt;
-  return Number.isFinite(updatedAt) && age >= 0 && age < BCV_RATE_CACHE_MS;
+  return Number.isFinite(updatedAt) && age >= 0 && age < USD_VES_RATE_CACHE_MS;
 }
 
 export async function getStoredBcvRate(): Promise<StoredRate | null> {
   const supabase = getSupabaseServerClient();
-  let pricingReadError: string | null = null;
-  let exchangeRate: { rate: number | string; updated_at: string } | null = null;
+  let exchangeRate: { source: string; rate: number | string; updated_at: string } | null = null;
   let exchangeRateLookupError: string | null = null;
 
   try {
     const { data, error } = await supabase
       .from('exchange_rates')
-      .select('rate, updated_at')
+      .select('source, rate, updated_at')
       .eq('currency', 'USD')
+      .in('source', [BINANCE_RATE_SOURCE, DOLARAPI_RATE_SOURCE])
       .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -128,44 +144,45 @@ export async function getStoredBcvRate(): Promise<StoredRate | null> {
     exchangeRate = data;
   } catch (error) {
     exchangeRateLookupError = errorMessage(error);
-    console.warn('[bcv][stored-rate:exchange_rates] No se pudo consultar la tasa USD más reciente:', error);
+    console.warn('[usd-ves][stored-rate:exchange_rates] No se pudo consultar la tasa más reciente:', error);
   }
 
   if (exchangeRate) {
     const rate = toValidRate(exchangeRate.rate);
     if (rate === null) {
-      throw new Error('La tasa BCV guardada en exchange_rates no es válida.');
+      throw new Error('La tasa USD/VES guardada en exchange_rates no es válida.');
     }
     return {
       rate,
       updatedAt: exchangeRate.updated_at,
-      source: 'supabase:exchange_rates',
+      storageSource: 'exchange_rates',
+      provider: exchangeRate.source,
     };
   }
 
   try {
-    const { data: steamPricing, error: steamPricingError } = await supabase
-      .from('product_pricing')
-      .select('bcv_rate, updated_at')
-      .eq('variant_id', STEAM_VARIANT_ID)
+    const { data: binanceRate, error: binanceRateError } = await supabase
+      .from('exchange_rates')
+      .select('rate, updated_at')
+      .eq('source', LEGACY_BINANCE_RATE_SOURCE)
       .maybeSingle();
 
-    if (steamPricingError) throw steamPricingError;
-    const steamRate = toValidRate(steamPricing?.bcv_rate);
-    if (steamRate !== null) {
+    if (binanceRateError) throw binanceRateError;
+    const legacyRate = toValidRate(binanceRate?.rate);
+    if (legacyRate !== null) {
       return {
-        rate: steamRate,
-        updatedAt: steamPricing.updated_at,
-        source: 'supabase:product_pricing:v-s10-glo',
+        rate: legacyRate,
+        updatedAt: binanceRate.updated_at,
+        storageSource: 'legacy_exchange_rates',
+        provider: BINANCE_RATE_SOURCE,
       };
     }
   } catch (error) {
-    pricingReadError = errorMessage(error);
-    console.warn(`[bcv][stored-rate:product_pricing] No se pudo leer el respaldo: ${pricingReadError}`);
+    console.warn('[usd-ves][stored-rate:legacy-binance] No se pudo leer la tasa Binance P2P anterior:', error);
   }
 
   throw new Error(
-    `No existe tasa válida en exchange_rates (${exchangeRateLookupError ?? 'sin fila'}); respaldo product_pricing (${pricingReadError ?? 'sin tasa válida'}).`
+    `No existe una tasa Binance P2P en exchange_rates (${exchangeRateLookupError ?? 'sin fila'}) ni en el registro Binance P2P anterior.`
   );
 }
 
@@ -201,9 +218,9 @@ export async function fetchMontosveRate(apiKey: string) {
       throw new Error(`La respuesta no es JSON válido: ${errorMessage(error)}. Respuesta cruda: ${rawText}`);
     }
 
-    const rate = extractMontosveBcvRate(payload);
+    const rate = extractMontosveBinanceRate(payload);
     if (rate === null || rate < 1 || rate > 10000) {
-      throw new Error(`La respuesta JSON no contiene una tasa BCV/USD válida. Respuesta cruda: ${rawText}`);
+      throw new Error(`La respuesta JSON no contiene una tasa Binance P2P USDT/VES válida para SELL. Respuesta cruda: ${rawText}`);
     }
     return rate;
   } finally {
@@ -211,19 +228,20 @@ export async function fetchMontosveRate(apiKey: string) {
   }
 }
 
-function extractMontosveBcvRate(payload: unknown): number | null {
+function extractMontosveBinanceRate(payload: unknown): number | null {
   const root = asRecord(payload);
   if (root?.success === false || root?.ok === false) return null;
 
   const rates = Array.isArray(root?.data) ? root.data : [];
-  const bcvUsdRate = rates.find((entry) => {
-    const rate = asRecord(entry);
-    return typeof rate?.market === 'string'
-      && rate.market.toLowerCase() === 'bcv'
-      && typeof rate.currency_pair === 'string'
-      && rate.currency_pair.toUpperCase() === 'USD/VES';
+  const binanceP2pRate = rates.find((entry) => {
+    const record = asRecord(entry);
+    return typeof record?.market === 'string'
+      && record.market.toLowerCase() === BINANCE_RATE_SOURCE
+      && typeof record.currency_pair === 'string'
+      && record.currency_pair.toUpperCase() === 'USDT/VES'
+      && (typeof record.trade_type !== 'string' || record.trade_type.toLowerCase() === 'sell');
   });
-  const rawRate = asRecord(bcvUsdRate)?.rate;
+  const rawRate = asRecord(binanceP2pRate)?.rate;
   const parsedRate = typeof rawRate === 'number'
     ? rawRate
     : typeof rawRate === 'string'
@@ -232,6 +250,61 @@ function extractMontosveBcvRate(payload: unknown): number | null {
   return Number.isFinite(parsedRate) && parsedRate >= 1 && parsedRate <= 10000
     ? parsedRate
     : null;
+}
+
+async function fetchDolarApiRate(): Promise<number> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(DOLARAPI_PARALLEL_URL, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-store' },
+      signal: controller.signal,
+    });
+    const rawText = await response.text();
+
+    if (!response.ok) {
+      throw new Error(`DolarAPI respondió HTTP ${response.status}. Respuesta cruda: ${rawText}`);
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(rawText);
+    } catch (error) {
+      throw new Error(`La respuesta de DolarAPI no es JSON válido: ${errorMessage(error)}. Respuesta cruda: ${rawText}`);
+    }
+
+    const rate = toValidRate(asRecord(payload)?.promedio);
+    if (rate === null || rate < 1 || rate > 10000) {
+      throw new Error(`La respuesta de DolarAPI no contiene un promedio válido. Respuesta cruda: ${rawText}`);
+    }
+    return rate;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchUsdVesRate(apiKey: string): Promise<FetchedRate> {
+  try {
+    return {
+      rate: await fetchMontosveRate(apiKey),
+      source: BINANCE_RATE_SOURCE,
+    };
+  } catch (primaryError) {
+    try {
+      return {
+        rate: await fetchDolarApiRate(),
+        source: DOLARAPI_RATE_SOURCE,
+        warning: `MontosVE Binance P2P falló; se usó DolarAPI paralelo. ${errorMessage(primaryError)}`,
+      };
+    } catch (fallbackError) {
+      throw new Error(
+        `MontosVE Binance P2P falló (${errorMessage(primaryError)}); DolarAPI también falló (${errorMessage(fallbackError)}).`
+      );
+    }
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -244,12 +317,15 @@ function toValidRate(value: unknown) {
   const rate = typeof value === 'number'
     ? value
     : typeof value === 'string'
-      ? Number.parseFloat(value.trim().replace(',', '.'))
+      ? Number(value.trim().replace(',', '.'))
       : NaN;
   return Number.isFinite(rate) && rate > 0 ? rate : null;
 }
 
-async function persistBcvRate(rate: number): Promise<PersistResult> {
+async function persistBcvRate(
+  rate: number,
+  source: typeof BINANCE_RATE_SOURCE | typeof DOLARAPI_RATE_SOURCE
+): Promise<PersistResult> {
   const warnings: string[] = [];
   let productPricingUpdated = 0;
   let exchangeRateUpdated = false;
@@ -260,7 +336,7 @@ async function persistBcvRate(rate: number): Promise<PersistResult> {
     supabase = getSupabaseServerClient();
   } catch (error) {
     const message = `No se pudo inicializar Supabase: ${errorMessage(error)}`;
-    console.error(`[bcv][persist] ${message}`);
+    console.error(`[usd-ves][persist] ${message}`);
     return {
       productPricingUpdated,
       exchangeRateUpdated,
@@ -296,14 +372,14 @@ async function persistBcvRate(rate: number): Promise<PersistResult> {
   } catch (error) {
     const message = `No se pudo actualizar product_pricing.bcv_rate/precio en Bs.: ${errorMessage(error)}`;
     warnings.push(message);
-    console.error(`[bcv][persist:product_pricing] ${message}`);
+    console.error(`[usd-ves][persist:product_pricing] ${message}`);
   }
 
   try {
     const { error } = await supabase
       .from('exchange_rates')
       .upsert(
-        { currency: 'USD', rate, updated_at: updatedAt },
+        { source, currency: 'USD', rate, updated_at: updatedAt },
         { onConflict: 'currency' }
       );
     if (error) throw error;
@@ -311,7 +387,7 @@ async function persistBcvRate(rate: number): Promise<PersistResult> {
   } catch (error) {
     const message = `No se pudo actualizar exchange_rates: ${errorMessage(error)}`;
     warnings.push(message);
-    console.error(`[bcv][persist:exchange_rates] ${message}`);
+    console.error(`[usd-ves][persist:exchange_rates] ${message}`);
   }
 
   return { productPricingUpdated, exchangeRateUpdated, warnings };

@@ -14,15 +14,15 @@ Las URLs solo se consultan en HTTPS y los hosts están limitados a `g2a.com`, `e
 3. `vercel.json` programa `/api/cron/binance-rate` cada cinco minutos. El panel de administración también solicita una actualización al abrir Analíticas y lee la tasa y su fecha guardadas; la ruta privada requiere el rol admin.
 4. La tasa almacenada es la mediana de hasta diez ofertas válidas de venta USDT/VES devueltas por Binance P2P. La disponibilidad del cron programado depende del plan de Vercel; si el plan no admite esta frecuencia, configura un scheduler externo para llamar la misma ruta con `Authorization: Bearer <CRON_SECRET>`.
 
-## Tasa BCV y prueba de Steam
+## Tasa Binance P2P y precios del catálogo
 
-- Ejecuta `migrations/20261110182000_exchange_rates_currency.sql` para agregar `exchange_rates.currency`, vincular el registro BCV existente con `USD` y habilitar el upsert por moneda.
+- Ejecuta `migrations/20261110182000_exchange_rates_currency.sql` para agregar `exchange_rates.currency`; luego ejecuta `migrations/20261127000100_binance_p2p_primary_rate.sql` para hacer Binance P2P la fuente principal, retirar la tasa BCV antigua y guardar el origen correcto.
 - Ejecuta `migrations/20261110183000_steam_pricing_upsert_defaults.sql` para que el upsert limitado de la variante Steam complete los campos obligatorios `product_id` y `profit_margin_percent` sin enviarlos desde la ruta.
 - Ejecuta `migrations/20261110190000_supplier_price_check_history.sql` para convertir `supplier_price_checks` en un historial con un ID propio, sin unicidad por variante/proveedor.
-- `/api/bcv-rate` consulta la tasa oficial MontosVE con `MONTOSVE_API_KEY` cuando no hay una fila BCV reciente en `exchange_rates` (caché de 12 horas). El API oficial devuelve `data[]` y la tasa buscada es la fila con `market: "bcv"`, `currency_pair: "USD/VES"` y `rate` numérico. Guarda la tasa en `exchange_rates` (`currency = 'USD'`) y actualiza `product_pricing.bcv_rate` y `final_price_bs` cuando existe un precio USD. El navegador consulta esta ruta sin caché.
-- Ejecuta `migrations/20261126000100_fixed_margin_catalog_repricing.sql` para crear la función atómica que actualiza la tasa BCV y recalcula los precios de todo `product_pricing` con un margen fijo de USD 3.00.
-- `/api/cron/test-steam` consulta directamente `https://api.montosve.com/v1/fx/rates` con `MONTOSVE_API_KEY` en el header `X-API-Key`, y luego actualiza los precios en dólares y bolívares con el margen fijo de USD 3.00. Procesa las filas con `current_cost_usd` o `fallback_cost_usd`; reporta como omitidas las filas sin costo base. Requiere `Authorization: Bearer <CRON_SECRET>`.
-- Binance P2P permanece privado; la tasa BCV se expone únicamente a través de la API pública utilizada por el banner.
+- `/api/bcv-rate` solicita `https://api.montosve.com/v1/fx/rates?trade_type=sell` con `MONTOSVE_API_KEY` en `X-API-Key`; busca en `data[]` la fila `market: "binance_p2p"`, `currency_pair: "USDT/VES"` y `rate` numérico. Si MontosVE falla o no tiene clave, usa `promedio` de `https://ve.dolarapi.com/v1/dolares/paralelo`. Persiste el origen (`binance_p2p` o `dolarapi_paralelo`) en `exchange_rates` con `currency = 'USD'`, actualiza `product_pricing.bcv_rate` y recalcula Bs. a partir del precio USD final. El navegador consulta esta ruta sin caché.
+- Ejecuta `migrations/20261126000100_fixed_margin_catalog_repricing.sql` y después `migrations/20261127000100_binance_p2p_primary_rate.sql` para instalar la función atómica del cron con margen fijo de USD 3.00 y origen de tasa explícito.
+- `/api/cron/test-steam` usa la misma tasa Binance P2P con respaldo DolarAPI y actualiza los precios en dólares y bolívares con margen fijo de USD 3.00. Procesa filas con `current_cost_usd` o `fallback_cost_usd`; reporta como omitidas las filas sin costo base. Requiere `Authorization: Bearer <CRON_SECRET>`.
+- La etiqueta pública muestra Binance P2P; cuando se activa el respaldo, indica DolarAPI. No se usa la tasa BCV.
 - Las comparaciones de proveedores se mantienen separadas del cron. La tabla `supplier_price_checks` conserva el historial de las comparaciones que se ejecutan desde las herramientas de proveedores.
 
 ## Sincronización de PlayStation Network Card
@@ -31,20 +31,20 @@ Ejecuta `migrations/20261111123000_playstation_price_sync.sql` para registrar `v
 
 El catálogo muestra PlayStation Network Card $10 USD (USA) dentro de Gift Cards, con la variante `PlayStation` / `US Store`; el precio utiliza el snapshot sincronizado cuando está disponible.
 
-Ejecuta `migrations/20261111150000_dynamic_tiered_pricing.sql` para retirar el trigger previo que fijaba el margen de Steam en 33%. La ruta `/api/cron/sync-catalog` conserva su margen escalonado: 33% más un buffer de $0.40 si el costo base es menor a $20, 20% entre $20 y $49.99, y 8% desde $50. En cambio, `/api/cron/test-steam` usa el margen fijo de USD 3.00 definido arriba. Ambas rutas guardan el precio final USD y la conversión BCV en Bs.
+Ejecuta `migrations/20261111150000_dynamic_tiered_pricing.sql` para retirar el trigger previo que fijaba el margen de Steam en 33%. La ruta `/api/cron/sync-catalog` conserva su margen escalonado: 33% más un buffer de $0.40 si el costo base es menor a $20, 20% entre $20 y $49.99, y 8% desde $50. En cambio, `/api/cron/test-steam` usa el margen fijo de USD 3.00 definido arriba. Ambas rutas guardan el precio final USD y su conversión a Bs. según Binance P2P o el respaldo DolarAPI.
 
-Ejecuta `migrations/20261111190000_atomic_catalog_price_sync.sql` y después `migrations/20261111193000_sync_exchange_rate_and_recalculate_catalog.sql` para instalar la sincronización atómica que utiliza `/api/cron/sync-catalog`. La tasa, los costos base y los precios escalonados de esa ruta se actualizan dentro de una transacción PostgreSQL. `/api/cron/test-steam` usa la función de margen fijo definida en `migrations/20261126000100_fixed_margin_catalog_repricing.sql`; no debe sustituirse por la función escalonada anterior.
+Ejecuta `migrations/20261111190000_atomic_catalog_price_sync.sql` y después `migrations/20261111193000_sync_exchange_rate_and_recalculate_catalog.sql` para instalar la sincronización atómica que utiliza `/api/cron/sync-catalog`. La tasa Binance P2P (o el respaldo DolarAPI), los costos base y los precios escalonados de esa ruta se actualizan dentro de una transacción PostgreSQL; la migración `20261127000100_binance_p2p_primary_rate.sql` añade el origen explícito. `/api/cron/test-steam` usa la función de margen fijo de USD 3.00.
 
 ## Ofertas de Steam Eneba/G2A
 
 1. Ejecuta `migrations/20261110140000_steam_offer_pricing.sql` y `migrations/20261110150000_steam_margin_33.sql` para guardar vendedor y enlace directo por oferta, el precio ganador, el margen aplicado y el total en Bs. La segunda migración fija el margen de `v-s10-glo` en 33%. La primera también fija las URLs públicas de Eneba y G2A para esa variante.
 2. Las comparaciones se realizan desde la herramienta administrativa de proveedores; el endpoint `/api/cron/test-steam` ya no consulta Eneba ni G2A.
 3. El parser de proveedores solo acepta ofertas no patrocinadas presentes en estado JSON público cuya moneda USD se pueda verificar. No simula un navegador ni sortea desafíos; si la página no expone ofertas parseables, informa proveedor no disponible y no actualiza el precio ganador.
-4. El cron de test-steam actualiza todos los costos base configurados usando la tasa BCV y suma USD 3.00. La tienda lee los precios finales USD y Bs. guardados en `product_pricing`.
+4. El cron de test-steam actualiza todos los costos base configurados usando Binance P2P (con respaldo DolarAPI) y suma USD 3.00. La tienda lee los precios finales USD y Bs. guardados en `product_pricing`.
 
-La ruta dinámica `/api/bcv-rate` devuelve la tasa de `exchange_rates` si tiene menos de 12 horas; si no, obtiene la tasa oficial de MontosVE, la persiste en Supabase y actualiza los importes en Bs. de los precios USD existentes. Si MontosVE no está disponible, utiliza la última tasa válida guardada cuando existe. La página solicita esta ruta sin caché al cargar y cada 15 minutos, sin reutilizar tasas guardadas en `localStorage`.
+La ruta dinámica `/api/bcv-rate` devuelve la tasa de `exchange_rates` si tiene menos de 12 horas; si no, obtiene Binance P2P de MontosVE, usa DolarAPI paralelo si hace falta, persiste el origen elegido en Supabase y actualiza los importes en Bs. de los precios USD existentes. Si ambas fuentes fallan, utiliza la última tasa válida guardada cuando existe. La página solicita esta ruta sin caché al cargar y cada 15 minutos, sin reutilizar tasas guardadas en `localStorage`.
 
-El checkout separa el precio de los productos del cargo de servicio de USD 0.40. El total incluye el subtotal descontado cuando aplica Gamer Cash Points más ese cargo; Pago Móvil muestra el desglose en USD y Bs. según la tasa BCV. El cargo cubre procesamiento digital, soporte y administración.
+El checkout separa el precio de los productos del cargo de servicio de USD 0.40. El total incluye el subtotal descontado cuando aplica Gamer Cash Points más ese cargo; Pago Móvil muestra el desglose en USD y Bs. según la tasa Binance P2P (o DolarAPI si está activo el respaldo). El cargo cubre procesamiento digital, soporte y administración.
 
 ## Checkout, ventas y Supabase Realtime
 
