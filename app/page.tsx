@@ -1185,12 +1185,14 @@ export default function App() {
     };
 
     setAdminOrdersLoading(true);
+    const refreshOrders = () => {
+      if (refreshTimeout) clearTimeout(refreshTimeout);
+      refreshTimeout = setTimeout(() => void loadOrders(), 150);
+    };
     const channel = supabase
       .channel('admin-orders-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' }, () => {
-        if (refreshTimeout) clearTimeout(refreshTimeout);
-        refreshTimeout = setTimeout(() => void loadOrders(), 150);
-      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sales' }, refreshOrders)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sales' }, refreshOrders)
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') void loadOrders();
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {

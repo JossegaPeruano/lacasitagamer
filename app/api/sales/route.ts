@@ -74,6 +74,21 @@ function imageSignatureIsValid(type: string, bytes: Uint8Array) {
     && String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]) === 'WEBP';
 }
 
+function logSalesCheckoutError(error: unknown) {
+  if (typeof error === 'object' && error !== null) {
+    const details = error as Record<string, unknown>;
+    console.error('[api/sales] Error técnico al procesar el checkout.', {
+      message: details.message,
+      details: details.details,
+      hint: details.hint,
+      code: details.code,
+    });
+    return;
+  }
+
+  console.error('[api/sales] Error técnico al procesar el checkout.', error);
+}
+
 export async function POST(request: Request) {
   const authorization = request.headers.get('authorization');
   const accessToken = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
@@ -306,7 +321,7 @@ export async function POST(request: Request) {
       const { error: cleanupError } = await supabaseClient.storage.from(PAYMENT_PROOFS_BUCKET).remove([uploadedProofPath]);
       if (cleanupError) console.error('[api/sales] Falló la limpieza de comprobante sin venta asociada.', cleanupError);
     }
-    console.error('[api/sales] No se pudo insertar el pedido en sales.', error);
+    logSalesCheckoutError(error);
     return NextResponse.json(
       { error: 'No se pudo registrar el pedido. Verifica los datos e intenta de nuevo.' },
       { status: 500, headers: noStoreHeaders }
