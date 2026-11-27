@@ -1039,39 +1039,26 @@ export default function App() {
 
     try {
       const supabase = getSupabaseBrowserClient();
-      supabase.auth.getUser().then(({ data, error }) => {
-        if (error) {
-          console.error('Error al obtener el usuario autenticado:', error);
-          return;
-        }
+      void supabase.auth.getSession().then(({ data, error }) => {
+        if (error) throw error;
         if (!active) return;
-        setCustomerAuthUser(data.user);
-        setCustomerAuthEmail(data.user?.email ?? null);
-      }).catch((error) => {
-        console.error('No se pudo obtener el usuario autenticado:', error);
-      }).finally(() => {
-        if (active) setIsCustomerAuthLoading(false);
-      });
-
-      supabase.auth.getSession().then(({ data, error }) => {
-        if (error) {
-          console.error('Error al restaurar la sesión de administración:', error);
-          return;
-        }
-        if (active) {
-          setCustomerAuthUser(data.session?.user ?? null);
-          setCustomerAuthEmail(data.session?.user.email ?? null);
-        }
-        if (active && new URLSearchParams(window.location.search).get('tab') === 'admin') {
-          if (isAdminUser(data.session?.user)) {
+        const user = data.session?.user ?? null;
+        setCustomerAuthUser(user);
+        setCustomerAuthEmail(user?.email ?? null);
+        if (new URLSearchParams(window.location.search).get('tab') === 'admin') {
+          if (isAdminUser(user)) {
             setIsAdminAuthenticated(true);
             setActiveTab('admin');
           } else {
             setShowAdminLoginModal(true);
           }
-        } else if (active && isAdminUser(data.session?.user)) {
+        } else if (isAdminUser(user)) {
           setIsAdminAuthenticated(true);
         }
+      }).catch((error) => {
+        if (active) console.error('No se pudo restaurar la sesión de Supabase:', error);
+      }).finally(() => {
+        if (active) setIsCustomerAuthLoading(false);
       });
 
       const { data } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -1107,14 +1094,15 @@ export default function App() {
       return () => { active = false; };
     }
 
-    supabase.auth.getUser()
+    supabase.auth.getSession()
       .then(({ data, error }) => {
         if (error) throw error;
         if (!active) return;
-        setCustomerAuthUser(data.user);
-        setCustomerAuthEmail(data.user?.email ?? null);
-        if (data.user) {
-          const profile = getCustomerProfile(data.user);
+        const user = data.session?.user ?? null;
+        setCustomerAuthUser(user);
+        setCustomerAuthEmail(user?.email ?? null);
+        if (user) {
+          const profile = getCustomerProfile(user);
           setCheckoutForm((current) => ({
             ...current,
             email: profile.email || current.email,

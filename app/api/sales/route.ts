@@ -81,19 +81,17 @@ function getSalesCheckoutDiagnostic(error: unknown) {
   const message = typeof errorFields.message === 'string'
     ? errorFields.message
     : error instanceof Error ? error.message : 'Error desconocido al procesar el pedido.';
-  const code = typeof errorFields.code === 'string' ? errorFields.code : undefined;
-
-  return { message, ...(code ? { code } : {}) };
+  return {
+    message,
+    code: typeof errorFields.code === 'string' ? errorFields.code : null,
+    details: typeof errorFields.details === 'string' ? errorFields.details : null,
+    hint: typeof errorFields.hint === 'string' ? errorFields.hint : null,
+  };
 }
 
 function logSalesCheckoutError(error: unknown) {
-  const errorFields = typeof error === 'object' && error !== null
-    ? error as Record<string, unknown>
-    : {};
   console.error('[api/sales] Error técnico al procesar el checkout.', {
     ...getSalesCheckoutDiagnostic(error),
-    details: errorFields.details,
-    hint: errorFields.hint,
   });
 }
 
@@ -298,8 +296,14 @@ export async function POST(request: Request) {
     const { error: insertError } = await supabase.from('sales').insert(salesRows);
     if (insertError) {
       if (uploadedProofPath) {
-        const { error: cleanupError } = await supabase.storage.from(PAYMENT_PROOFS_BUCKET).remove([uploadedProofPath]);
-        if (cleanupError) console.error('[api/sales] Falló la limpieza de comprobante sin venta asociada.', cleanupError);
+        try {
+          const { error: cleanupError } = await supabase.storage
+            .from(PAYMENT_PROOFS_BUCKET)
+            .remove([uploadedProofPath]);
+          if (cleanupError) console.error('[api/sales] Falló la limpieza de comprobante sin venta asociada.', cleanupError);
+        } catch (cleanupError) {
+          console.error('[api/sales] Falló la limpieza de comprobante sin venta asociada.', cleanupError);
+        }
         uploadedProofPath = null;
       }
       if (insertError.code === '23505') {
@@ -328,8 +332,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ orderId }, { status: 201, headers: noStoreHeaders });
   } catch (error) {
     if (uploadedProofPath && supabaseClient) {
-      const { error: cleanupError } = await supabaseClient.storage.from(PAYMENT_PROOFS_BUCKET).remove([uploadedProofPath]);
-      if (cleanupError) console.error('[api/sales] Falló la limpieza de comprobante sin venta asociada.', cleanupError);
+      try {
+        const { error: cleanupError } = await supabaseClient.storage
+          .from(PAYMENT_PROOFS_BUCKET)
+          .remove([uploadedProofPath]);
+        if (cleanupError) console.error('[api/sales] Falló la limpieza de comprobante sin venta asociada.', cleanupError);
+      } catch (cleanupError) {
+        console.error('[api/sales] Falló la limpieza de comprobante sin venta asociada.', cleanupError);
+      }
     }
     logSalesCheckoutError(error);
     return NextResponse.json(
