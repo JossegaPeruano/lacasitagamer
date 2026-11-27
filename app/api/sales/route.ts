@@ -74,19 +74,27 @@ function imageSignatureIsValid(type: string, bytes: Uint8Array) {
     && String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]) === 'WEBP';
 }
 
-function logSalesCheckoutError(error: unknown) {
-  if (typeof error === 'object' && error !== null) {
-    const details = error as Record<string, unknown>;
-    console.error('[api/sales] Error técnico al procesar el checkout.', {
-      message: details.message,
-      details: details.details,
-      hint: details.hint,
-      code: details.code,
-    });
-    return;
-  }
+function getSalesCheckoutDiagnostic(error: unknown) {
+  const errorFields = typeof error === 'object' && error !== null
+    ? error as Record<string, unknown>
+    : {};
+  const message = typeof errorFields.message === 'string'
+    ? errorFields.message
+    : error instanceof Error ? error.message : 'Error desconocido al procesar el pedido.';
+  const code = typeof errorFields.code === 'string' ? errorFields.code : undefined;
 
-  console.error('[api/sales] Error técnico al procesar el checkout.', error);
+  return { message, ...(code ? { code } : {}) };
+}
+
+function logSalesCheckoutError(error: unknown) {
+  const errorFields = typeof error === 'object' && error !== null
+    ? error as Record<string, unknown>
+    : {};
+  console.error('[api/sales] Error técnico al procesar el checkout.', {
+    ...getSalesCheckoutDiagnostic(error),
+    details: errorFields.details,
+    hint: errorFields.hint,
+  });
 }
 
 export async function POST(request: Request) {
@@ -281,6 +289,8 @@ export async function POST(request: Request) {
       total: Number(lineTotal.toFixed(2)),
       method,
       reference: normalizedReference,
+      payment_method: method,
+      payment_reference: normalizedReference,
       customer_info: customerInfo,
       status: 'pendiente',
     }));
@@ -323,7 +333,10 @@ export async function POST(request: Request) {
     }
     logSalesCheckoutError(error);
     return NextResponse.json(
-      { error: 'No se pudo registrar el pedido. Verifica los datos e intenta de nuevo.' },
+      {
+        error: 'No se pudo registrar el pedido. Verifica los datos e intenta de nuevo.',
+        diagnostic: getSalesCheckoutDiagnostic(error),
+      },
       { status: 500, headers: noStoreHeaders }
     );
   }

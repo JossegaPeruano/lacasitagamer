@@ -1693,6 +1693,15 @@ export default function App() {
       const response = await fetch('/api/sales', { method: 'POST', body: requestBody });
       const result: unknown = await response.json();
       if (!response.ok) {
+        if (
+          typeof result === 'object'
+          && result !== null
+          && 'diagnostic' in result
+          && typeof result.diagnostic === 'object'
+          && result.diagnostic !== null
+        ) {
+          console.error('Detalle técnico del error al registrar el pedido:', result.diagnostic);
+        }
         const errorMessage = typeof result === 'object'
           && result !== null
           && 'error' in result
